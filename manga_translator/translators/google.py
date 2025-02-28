@@ -14,6 +14,7 @@ from typing import List
 
 import httpcore
 import httpx
+setattr(httpcore, 'SyncHTTPTransport', any)
 from httpx import Timeout
 
 from googletrans import urls, utils
@@ -96,11 +97,17 @@ class GoogleTranslator(CommonTranslator):
         'ESP': 'es',
         'TRK': 'tr',
         'UKR': 'uk',
+        'ARA': 'ar',
+        'SRP': 'sr',
+        'HRV': 'hr',
+        'THA': 'th',
+        'IND': 'id',
+        'FIL': 'tl'
     }
+
 
     def __init__(self, service_urls=DEFAULT_CLIENT_SERVICE_URLS, user_agent=DEFAULT_USER_AGENT,
                  raise_exception=DEFAULT_RAISE_EXCEPTION,
-                 proxies: typing.Dict[str, httpcore.AsyncHTTPTransport] = None,
                  timeout: Timeout = None,
                  http2=True,
                  use_fallback=False):
@@ -133,7 +140,7 @@ class GoogleTranslator(CommonTranslator):
 
     async def _translate(self, from_lang: str, to_lang: str, queries: List[str]) -> List[str]:
 
-        # Seperate en/ja queries to improve translation quality
+        # Separate en/ja queries to improve translation quality
         langs = ['en', 'ja']
         langid.set_languages(langs)
         lang_to_queries = {l: [] for l in langs}
@@ -227,11 +234,14 @@ class GoogleTranslator(CommonTranslator):
         should_spacing = True
         translated_parts = []
         # print(parsed)
-        for part in parsed[1][0][0][5]:
-            try:
-                translated_parts.append(part[4][1][0])
-            except IndexError:
-                translated_parts.append(part[0])
+        try:
+            for part in parsed[1][0][0][5]:
+                try:
+                    translated_parts.append(part[4][1][0])
+                except (IndexError, TypeError):
+                    translated_parts.append(part[0])
+        except IndexError:
+            translated_parts.append("")
         translated = (' ' if should_spacing else '').join(translated_parts)
 
         if from_lang == 'auto':

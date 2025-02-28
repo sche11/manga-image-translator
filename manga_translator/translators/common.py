@@ -4,7 +4,7 @@ import asyncio
 from typing import List, Tuple
 from abc import abstractmethod
 
-from ..utils import InfererModule, ModelWrapper, repeating_sequence
+from ..utils import InfererModule, ModelWrapper, repeating_sequence, is_valuable_text
 
 try:
     import readline
@@ -31,6 +31,13 @@ VALID_LANGUAGES = {
     'TRK': 'Turkish',
     'UKR': 'Ukrainian',
     'VIN': 'Vietnamese',
+    'ARA': 'Arabic',
+    'CNR': 'Montenegrin',
+    'SRP': 'Serbian',
+    'HRV': 'Croatian',
+    'THA': 'Thai',
+    'IND': 'Indonesian',
+    'FIL': 'Filipino (Tagalog)'
 }
 
 ISO_639_1_TO_VALID_LANGUAGES = {
@@ -52,6 +59,14 @@ ISO_639_1_TO_VALID_LANGUAGES = {
     'es': 'ESP',
     'tr': 'TRK',
     'uk': 'UKR',
+    'vi': 'VIN',
+    'ar': 'ARA',
+    'cnr': 'CNR',
+    'sr': 'SRP',
+    'hr': 'HRV',
+    'th': 'THA',
+    'id': 'IND',
+    'tl': 'FIL'
 }
 
 class InvalidServerResponse(Exception):
@@ -146,11 +161,12 @@ class CommonTranslator(InfererModule):
         query_indices = []
         final_translations = []
         for i, query in enumerate(queries):
-            if not re.search(r'\w', query):
+            if not is_valuable_text(query):
                 final_translations.append(queries[i])
             else:
                 final_translations.append(None)
                 query_indices.append(i)
+
         queries = [queries[i] for i in query_indices]
 
         translations = [''] * len(queries)
@@ -191,14 +207,20 @@ class CommonTranslator(InfererModule):
             if not untranslated_indices:
                 break
 
-        translations = [self._clean_translation_output(q, r) for q, r in zip(queries, translations)]
+        translations = [self._clean_translation_output(q, r, to_lang) for q, r in zip(queries, translations)]
+
+        if to_lang == 'ARA':
+            import arabic_reshaper
+            translations = [arabic_reshaper.reshape(t) for t in translations]
+
+        if use_mtpe:
+            translations = await self.mtpe_adapter.dispatch(queries, translations)
 
         # Merge with the queries without text
         for i, trans in enumerate(translations):
             final_translations[query_indices[i]] = trans
+            self.logger.info(f'{i}: {queries[i]} => {trans}')
 
-        if use_mtpe:
-            final_translations = await self.mtpe_adapter.dispatch(queries, final_translations)
         return final_translations
 
     @abstractmethod
@@ -233,7 +255,7 @@ class CommonTranslator(InfererModule):
         """
         return query
 
-    def _clean_translation_output(self, query: str, trans: str) -> str:
+    def _clean_translation_output(self, query: str, trans: str, to_lang: str) -> str:
         """
         Tries to spot and skim down invalid translations.
         """
@@ -242,14 +264,16 @@ class CommonTranslator(InfererModule):
 
         # '  ' -> ' '
         trans = re.sub(r'\s+', r' ', trans)
-        # 'text .' -> 'text.'
-        trans = re.sub(r'(?<=[.,;!?\w])\s+([.,;!?])', r'\1', trans)
         # 'text.text' -> 'text. text'
         trans = re.sub(r'(?<![.,;!?])([.,;!?])(?=\w)', r'\1 ', trans)
         # ' ! ! . . ' -> ' !!.. '
         trans = re.sub(r'([.,;!?])\s+(?=[.,;!?]|$)', r'\1', trans)
-        # ' ... text' -> ' ...text'
-        trans = re.sub(r'((?:\s|^)\.+)\s+(?=\w)', r'\1', trans)
+
+        if to_lang != 'ARA':
+            # 'text .' -> 'text.'
+            trans = re.sub(r'(?<=[.,;!?\w])\s+([.,;!?])', r'\1', trans)
+            # ' ... text' -> ' ...text'
+            trans = re.sub(r'((?:\s|^)\.+)\s+(?=\w)', r'\1', trans)
 
         seq = repeating_sequence(trans.lower())
 
@@ -295,3 +319,10 @@ class OfflineTranslator(CommonTranslator, ModelWrapper):
 
     async def reload(self, from_lang: str, to_lang: str, device: str):
         return await super().reload(device, from_lang, to_lang)
+    
+    @abstractmethod
+    async def _load(self, from_lang: str, to_lang: str, device: str):
+        pass
+
+    async def unload(self, device: str):
+        return await super().unload()

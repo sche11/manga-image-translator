@@ -1,21 +1,14 @@
 import os
-import sys
 import cv2
 import pytest
 from typing import List
 import numpy as np
-
-pytest_plugins = ('pytest_asyncio')
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from manga_translator.textline_merge import dispatch as dispatch_merge
 from manga_translator.utils import (
     TextBlock,
     Quadrilateral,
     visualize_textblocks,
 )
-
 
 BBOX_IMAGE_FOLDER = 'test/testdata/bboxes'
 os.makedirs(BBOX_IMAGE_FOLDER, exist_ok=True)
@@ -51,19 +44,17 @@ async def generate_combinations(lines: List[List[List[int]]], width: int, height
         generated_combinations.append(combination)
     return generated_combinations, regions
 
-async def run_test(lines, expected_combinations, width, height, path = None):
+async def run_test(lines: List, expected_combinations: List, width: int, height: int, path = None):
     generated_combinations, regions = await generate_combinations(lines, width, height)
 
     # Save as image
     path = os.path.join(BBOX_IMAGE_FOLDER, path or 'bboxes.png')
     save_regions_to_image(path, regions, width, height)
 
-    invalid_regions = []
-    for i, generated_combination in enumerate(generated_combinations):
-        if generated_combination not in expected_combinations:
-            invalid_regions.append(i)
-    if invalid_regions:
-        raise Exception(f'Invalid regions: {invalid_regions} - Image saved under {path}')
+    expected_as_tuples = set(tuple(combination) for combination in expected_combinations)
+    generated_as_tuples = set(tuple(combination) for combination in generated_combinations)
+
+    assert expected_as_tuples == generated_as_tuples, f"image saved under {path}"
 
         # # Search for all associated regions
         # associated_regions = []
@@ -299,6 +290,78 @@ async def test_merge_image7():
         [[614, 106], [659, 106], [659, 318], [614, 318]],
         [[496, 106], [543, 106], [543, 253], [496, 253]],
     ]
-    # print((await generate_combinations(lines, width, height))[0])
     expected_combinations = [[0, 1], [2, 3, 4], [5, 6], [7, 8], [9, 10, 11], [12, 13], [14], [15, 16, 17], [21, 22, 23, 24], [18, 19, 20]]
     await run_test(lines, expected_combinations, width, height, '7.png')
+
+@pytest.mark.asyncio
+async def test_merge_image8():
+    width, height = 1115, 1600
+    lines = [
+        [[429, 167], [470, 167], [470, 247], [429, 247]],
+        [[406, 175], [428, 175], [428, 306], [406, 306]],
+        [[ 993,   97], [1017,   97], [1017,  158], [ 993,  158]],
+        [[ 636, 1469], [ 659, 1469], [ 659, 1531], [ 636, 1531]],
+        [[431, 519], [454, 519], [454, 584], [431, 584]],
+        [[161, 483], [187, 483], [187, 570], [161, 570]],
+        [[529, 438], [551, 438], [551, 528], [529, 528]],
+        [[ 234,  998], [ 261,  998], [ 261, 1125], [ 234, 1125]],
+        [[728, 480], [750, 480], [750, 589], [728, 589]],
+        [[562, 438], [589, 438], [589, 572], [562, 572]],
+        [[ 267, 1384], [ 294, 1384], [ 294, 1519], [ 267, 1519]],
+        [[978, 417], [999, 417], [999, 522], [978, 522]],
+        [[568,  78], [595,  78], [595, 234], [568, 234]],
+        [[ 170, 1388], [ 192, 1388], [ 192, 1517], [ 170, 1517]],
+        [[458, 520], [479, 520], [479, 644], [458, 644]],
+        [[912, 720], [943, 720], [943, 905], [912, 905]],
+        [[537,  80], [559,  80], [559, 212], [537, 212]],
+        [[904, 130], [926, 130], [926, 264], [904, 264]],
+        [[137, 484], [158, 484], [158, 631], [137, 631]],
+        [[ 203, 1386], [ 225, 1386], [ 225, 1541], [ 203, 1541]],
+        [[839, 131], [860, 131], [860, 284], [839, 284]],
+        [[701, 480], [721, 480], [721, 633], [701, 633]],
+        [[ 270, 1002], [ 297, 1002], [ 297, 1209], [ 270, 1209]],
+        [[ 236, 1384], [ 259, 1385], [ 258, 1563], [ 234, 1562]],
+        [[871, 131], [893, 131], [893, 308], [871, 308]],
+    ]
+    expected_combinations = [[0, 1], [2], [3], [4, 14], [5, 18], [6, 9], [7, 22], [8, 21], [10, 13, 19, 23], [11], [12, 16], [15], [17, 20, 24]]
+    await run_test(lines, expected_combinations, width, height, '8.png')
+
+@pytest.mark.asyncio
+async def test_merge_image9():
+    width, height = 1158, 1637
+    lines = [
+        [[ 527,  957], [ 646,  933], [ 685, 1129], [ 565, 1153]],
+        [[  0,  89], [112,  73], [142, 311], [ 14, 327]],
+        [[ 866,  824], [ 967,  803], [1010, 1006], [ 909, 1027]],
+        [[ 213,  791], [ 327,  771], [ 373, 1028], [ 258, 1048]],
+        [[ 969, 1483], [1008, 1475], [1033, 1609], [ 996, 1616]],
+        [[484,  20], [553,  20], [556, 334], [488, 334]],
+        [[550,  20], [617,  22], [605, 369], [539, 367]],
+        [[1018,   20], [1080,   21], [1075,  426], [1013,  425]],
+        [[1080,    9], [1148,    9], [1152,  464], [1083,  464]],
+    ]
+    expected_combinations = [[0], [2], [3], [1], [4], [5, 6], [7, 8]]
+    await run_test(lines, expected_combinations, width, height, '9.png')
+
+@pytest.mark.asyncio
+async def test_merge_image10():
+    width, height = 3035, 4299
+    lines = [
+        [[298, 420], [357, 420], [357, 567], [298, 567]],
+        [[2628, 1612], [2674, 1612], [2674, 1788], [2628, 1788]],
+        [[ 982, 3250], [1287, 3240], [1289, 3316], [ 984, 3326]],
+        [[1339, 1948], [1398, 1948], [1398, 2229], [1339, 2229]],
+        [[1410, 1948], [1469, 1948], [1469, 2233], [1410, 2233]],
+        [[1520,  231], [1578,  231], [1578,  525], [1520,  525]],
+        [[2632, 1772], [2674, 1772], [2674, 2003], [2632, 2003]],
+        [[1595,  235], [1641,  235], [1641,  508], [1595,  508]],
+        [[2569, 1608], [2624, 1608], [2624, 1948], [2569, 1948]],
+        [[348, 424], [403, 424], [403, 814], [348, 814]],
+        [[1444,  231], [1503,  231], [1503,  697], [1444,  697]],
+        [[2665, 1609], [2720, 1608], [2729, 2052], [2674, 2053]],
+        [[1645, 3187], [1704, 3186], [1713, 3832], [1654, 3833]],
+        [[1708, 3195], [1750, 3195], [1750, 3795], [1708, 3795]],
+    ]
+    # print((await generate_combinations(lines, width, height))[0])
+    expected_combinations = [[0, 9], [1, 6, 8, 11], [2], [3, 4], [5, 7, 10], [12, 13]]
+    await run_test(lines, expected_combinations, width, height, '10.png')

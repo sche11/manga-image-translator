@@ -5,10 +5,13 @@ import cv2
 import math
 
 from tqdm import tqdm
+from shapely.geometry import Polygon
 # from sklearn.mixture import BayesianGaussianMixture
 # from functools import reduce
 # from collections import defaultdict
 # from scipy.optimize import linear_sum_assignment
+
+from ..utils import Quadrilateral, image_resize
 
 COLOR_RANGE_SIGMA = 1.5 # how many stddev away is considered the same color
 
@@ -49,49 +52,18 @@ def rect_distance(x1, y1, x1b, y1b, x2, y2, x2b, y2b):
         return y2 - y1b
     else:             # rectangles intersect
         return 0
+    
+def extend_rect(x, y, w, h, max_x, max_y, extend_size):
+    x1 = max(x - extend_size, 0)
+    y1 = max(y - extend_size, 0)
+    w1 = min(w + extend_size * 2, max_x - x1 - 1)
+    h1 = min(h + extend_size * 2, max_y - y1 - 1)
+    return x1, y1, w1, h1
 
-def filter_masks(mask_img: np.ndarray, textlines: List[Tuple[int, int, int, int]], keep_threshold = 1e-2):
-    mask_img = mask_img.copy()
-    for (x, y, w, h) in textlines:
-        cv2.rectangle(mask_img, (x, y), (x + w, y + h), (0), 1)
-    if len(textlines) == 0:
-        return [], []
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask_img)
-
-    cc2textline_assignment = []
-    result = []
-    M = len(textlines)
-    ratio_mat = np.zeros(shape = (num_labels, M), dtype = np.float32)
-    dist_mat = np.zeros(shape = (num_labels, M), dtype = np.float32)
-    for i in range(1, num_labels):
-        if stats[i, cv2.CC_STAT_AREA] <= 9:
-            continue # skip area too small
-        cc = np.zeros_like(mask_img)
-        cc[labels == i] = 255
-        x1, y1, w1, h1 = cv2.boundingRect(cc)
-        area1 = w1 * h1
-        for j in range(M):
-            x2, y2, w2, h2 = textlines[j]
-            area2 = w2 * h2
-            overlapping_area = area_overlap(x1, y1, w1, h1, x2, y2, w2, h2)
-            ratio_mat[i, j] = overlapping_area / min(area1, area2)
-            dist_mat[i, j] = rect_distance(x1, y1, x1 + w1, y1 + h1, x2, y2, x2 + w2, y2 + h2)
-        j = np.argmax(ratio_mat[i])
-        if ratio_mat[i, j] > keep_threshold:
-            cc2textline_assignment.append(j)
-            result.append(np.copy(cc))
-        else:
-            j = np.argmin(dist_mat[i])
-            area2 = textlines[j][2] * textlines[j][3]
-            unit = min([h1, w1, h2, w2])
-            # if small mask segment nearby textline
-            if dist_mat[i, j] < 0.5 * unit and area1 < area2:
-                cc2textline_assignment.append(j)
-                result.append(np.copy(cc))
-            else:
-                # discard
-                pass
-    return result, cc2textline_assignment
+def complete_mask_fill(text_lines: List[Tuple[int, int, int, int]]):
+    for (x, y, w, h) in text_lines:
+        final_mask = cv2.rectangle(final_mask, (x, y), (x + w, y + h), (255), -1)
+    return final_mask
 
 from pydensecrf.utils import compute_unary, unary_from_softmax
 import pydensecrf.densecrf as dcrf
@@ -121,47 +93,103 @@ def refine_mask(rgbimg, rawmask):
     crf_mask = np.array(res * 255, dtype=np.uint8)
     return crf_mask
 
-def complete_mask_fill(img_np: np.ndarray, ccs: List[np.ndarray], text_lines: List[Tuple[int, int, int, int]], cc2textline_assignment):
-    if len(ccs) == 0:
-        return
-    for (x, y, w, h) in text_lines:
-        final_mask = cv2.rectangle(final_mask, (x, y), (x + w, y + h), (255), -1)
-    return final_mask
+def complete_mask(img: np.ndarray, mask: np.ndarray, textlines: List[Quadrilateral], keep_threshold = 1e-2, dilation_offset = 0,kernel_size=3):
+    bboxes = [txtln.aabb.xywh for txtln in textlines]
+    polys = [Polygon(txtln.pts) for txtln in textlines]
+    for (x, y, w, h) in bboxes:
+        cv2.rectangle(mask, (x, y), (x + w, y + h), (0), 1)
+    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask)
 
-def complete_mask(img_np: np.ndarray, ccs: List[np.ndarray], textlines: List[Tuple[int, int, int, int]], cc2textline_assignment):
-    if len(ccs) == 0:
-        return
-    textline_ccs = [np.zeros_like(ccs[0]) for _ in range(len(textlines))]
-    for i, cc in enumerate(ccs):
-        txtline = cc2textline_assignment[i]
-        textline_ccs[txtline] = cv2.bitwise_or(textline_ccs[txtline], cc)
-    final_mask = np.zeros_like(ccs[0])
-    img_np = cv2.bilateralFilter(img_np, 17, 80, 80)
+    M = len(textlines)
+    textline_ccs = [np.zeros_like(mask) for _ in range(M)]
+    iinfo = np.iinfo(labels.dtype)
+    textline_rects = np.full(shape = (M, 4), fill_value = [iinfo.max, iinfo.max, iinfo.min, iinfo.min], dtype = labels.dtype)
+    ratio_mat = np.zeros(shape = (num_labels, M), dtype = np.float32)
+    dist_mat = np.zeros(shape = (num_labels, M), dtype = np.float32)
+    valid = False
+    for label in range(1, num_labels):
+        # skip area too small
+        if stats[label, cv2.CC_STAT_AREA] <= 9:
+            continue
+
+        x1 = stats[label, cv2.CC_STAT_LEFT]
+        y1 = stats[label, cv2.CC_STAT_TOP]
+        w1 = stats[label, cv2.CC_STAT_WIDTH]
+        h1 = stats[label, cv2.CC_STAT_HEIGHT]
+        area1 = stats[label, cv2.CC_STAT_AREA]
+        cc_pts = np.array([[x1, y1], [x1 + w1, y1], [x1 + w1, y1 + h1], [x1, y1 + h1]])
+        cc_poly = Polygon(cc_pts)
+
+        for tl_idx in range(M):
+            area2 = polys[tl_idx].area
+            overlapping_area = polys[tl_idx].intersection(cc_poly).area
+            ratio_mat[label, tl_idx] = overlapping_area / min(area1, area2)
+            dist_mat[label, tl_idx] = polys[tl_idx].distance(cc_poly.centroid)
+            # print(textlines[tl_idx].pts, cc_pts, '->', overlapping_area, min(area1, area2), '=', overlapping_area / min(area1, area2), '|', polys[tl_idx].distance(cc_poly))
+
+        avg = np.argmax(ratio_mat[label])
+        # print(avg, 'overlap:', ratio_mat[label, avg], '<=', keep_threshold)
+        area2 = polys[avg].area
+        if area1 >= area2:
+            continue
+        if ratio_mat[label, avg] <= keep_threshold:
+            avg = np.argmin(dist_mat[label])
+            area2 = polys[avg].area
+            unit = max(min([textlines[avg].font_size, w1, h1]), 10)
+            # print("unit", unit, textlines[avg].font_size, w1, h1)
+            # if area1 < 0.4 * w1 * h1:
+            #     # ccs is probably angled
+            #     unit /= 2
+            # if avg == 0:
+            # print('no intersect', area1, '>=', area2, dist_mat[label, avg], '>=', 0.5 * unit)
+            if dist_mat[label, avg] >= 0.5 * unit:
+                # print(dist_mat[label])
+                # print('CONTINUE')
+                continue
+
+        textline_ccs[avg][y1:y1+h1, x1:x1+w1][labels[y1:y1+h1, x1:x1+w1] == label] = 255
+        # if avg == 0:
+        # print(avg)
+        # cv2.imshow('ccs', image_resize(textline_ccs[avg], height = 800))
+        # cv2.waitKey(0)
+        textline_rects[avg, 0] = min(textline_rects[avg, 0], x1)
+        textline_rects[avg, 1] = min(textline_rects[avg, 1], y1)
+        textline_rects[avg, 2] = max(textline_rects[avg, 2], x1 + w1)
+        textline_rects[avg, 3] = max(textline_rects[avg, 3], y1 + h1)
+        valid = True
+
+    if not valid:
+        return None
+    
+    # tblr to xywh
+    textline_rects[:, 2] -= textline_rects[:, 0]
+    textline_rects[:, 3] -= textline_rects[:, 1]
+    
+    final_mask = np.zeros_like(mask)
+    img = cv2.bilateralFilter(img, 17, 80, 80)
     for i, cc in enumerate(tqdm(textline_ccs, '[mask]')):
-        x1, y1, w1, h1 = cv2.boundingRect(cc)
-        text_size = min(w1, h1)
-        extend_size = int(text_size * 0.1)
-        x1 = max(x1 - extend_size, 0)
-        y1 = max(y1 - extend_size, 0)
-        w1 += extend_size * 2
-        h1 += extend_size * 2
-        w1 = min(w1, img_np.shape[1] - x1 - 1)
-        h1 = min(h1, img_np.shape[0] - y1 - 1)
-        dilate_size = max((int(text_size * 0.3) // 2) * 2 + 1, 3)
+        x1, y1, w1, h1 = textline_rects[i]
+        text_size = min(w1, h1, textlines[i].font_size)
+        x1, y1, w1, h1 = extend_rect(x1, y1, w1, h1, img.shape[1], img.shape[0], int(text_size * 0.1))
+        # TODO: Need to think of better way to determine dilate_size.
+        dilate_size = max((int((text_size + dilation_offset) * 0.3) // 2) * 2 + 1, 3)
+        # print(textlines[i].font_size, min(w1, h1), dilate_size)
         kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate_size, dilate_size))
         cc_region = np.ascontiguousarray(cc[y1: y1 + h1, x1: x1 + w1])
         if cc_region.size == 0:
             continue
-        #cv2.imshow('cc before', image_resize(cc_region, width = 256))
-        img_region = np.ascontiguousarray(img_np[y1: y1 + h1, x1: x1 + w1])
-        #cv2.imshow('img', image_resize(img_region, width = 256))
+        # cv2.imshow('cc before', image_resize(cc_region, height = 800))
+        img_region = np.ascontiguousarray(img[y1: y1 + h1, x1: x1 + w1])
+        # cv2.imshow('img', image_resize(img_region, height = 800))
         cc_region = refine_mask(img_region, cc_region)
-        #cv2.imshow('cc after', image_resize(cc_region, width = 256))
-        #cv2.waitKey(0)
+        # cv2.imshow('cc after', image_resize(cc_region, height = 800))
+        # cv2.waitKey(0)
         cc[y1: y1 + h1, x1: x1 + w1] = cc_region
-        cc = cv2.dilate(cc, kern)
-        final_mask = cv2.bitwise_or(final_mask, cc)
-    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        # cc = cv2.dilate(cc, kern)
+        x2, y2, w2, h2 = extend_rect(x1, y1, w1, h1, img.shape[1], img.shape[0], -(-dilate_size // 2))
+        cc[y2:y2+h2, x2:x2+w2] = cv2.dilate(cc[y2:y2+h2, x2:x2+w2], kern)
+        final_mask[y2:y2+h2, x2:x2+w2] = cv2.bitwise_or(final_mask[y2:y2+h2, x2:x2+w2], cc[y2:y2+h2, x2:x2+w2])
+    kern = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
     # for (x, y, w, h) in text_lines:
     #     final_mask = cv2.rectangle(final_mask, (x, y), (x + w, y + h), (255), -1)
     return cv2.dilate(final_mask, kern)

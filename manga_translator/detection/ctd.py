@@ -83,9 +83,9 @@ class ComicTextDetector(OfflineDetector):
 
     async def _load(self, device: str, input_size=1024, half=False, nms_thresh=0.35, conf_thresh=0.4):
         self.device = device
-        if self.device == 'cuda':
+        if self.device == 'cuda' or self.device == 'mps':
             self.model = TextDetBase(self._get_file_path('comictextdetector.pt'), device=self.device, act='leaky')
-            self.model.cuda()
+            self.model.to(self.device)
             self.backend = 'torch'
         else:
             model_path = self._get_file_path('comictextdetector.pt.onnx')
@@ -131,7 +131,7 @@ class ComicTextDetector(OfflineDetector):
                      unclip_ratio: float, verbose: bool = False):
 
         # keep_undetected_mask = False
-        refine_mode = REFINEMASK_INPAINT
+        # refine_mode = REFINEMASK_INPAINT
 
         im_h, im_w = image.shape[:2]
         lines_map, mask = det_rearrange_forward(image, self.det_batch_forward_ctd, self.input_size[0], 4, self.device, verbose)
@@ -174,9 +174,9 @@ class ComicTextDetector(OfflineDetector):
         # as the merge could be postponed until after the OCR finishes.
 
         textlines = [Quadrilateral(pts.astype(int), '', score) for pts, score in zip(lines, scores)]
-        mask_refined = refine_mask(image, mask, textlines, refine_mode=refine_mode)
+        mask_refined = refine_mask(image, mask, textlines, refine_mode=None)
 
-        return textlines, mask, mask_refined
+        return textlines, mask_refined, None
 
         # blk_list = group_output(blks, lines, im_w, im_h, mask)
         # mask_refined = refine_mask(image, mask, blk_list, refine_mode=refine_mode)

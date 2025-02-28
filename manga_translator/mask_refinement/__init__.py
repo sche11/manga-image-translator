@@ -1,40 +1,34 @@
-import os
 from typing import List
 import cv2
 import numpy as np
-# from functools import reduce
 
-from .text_mask_utils import complete_mask_fill, filter_masks, complete_mask
+from .text_mask_utils import complete_mask_fill, complete_mask
 from ..utils import TextBlock, Quadrilateral
 from ..utils.bubble import is_ignore
 
-async def dispatch(text_regions: List[TextBlock], raw_image: np.ndarray, raw_mask: np.ndarray, method: str = 'fit_text', verbose: bool = False, ignore_bubble: int = 0) -> np.ndarray:
-    img_resized = cv2.resize(raw_image, (raw_image.shape[1] // 2, raw_image.shape[0] // 2), interpolation = cv2.INTER_LINEAR)
-    mask_resized = cv2.resize(raw_mask, (raw_image.shape[1] // 2, raw_image.shape[0] // 2), interpolation = cv2.INTER_LINEAR)
+async def dispatch(text_regions: List[TextBlock], raw_image: np.ndarray, raw_mask: np.ndarray, method: str = 'fit_text', dilation_offset: int = 0, ignore_bubble: int = 0, verbose: bool = False,kernel_size:int=3) -> np.ndarray:
+    # Larger sized mask images will probably have crisper and thinner mask segments due to being able to fit the text pixels better
+    # so we dont want to size them down as much to not lose information
+    scale_factor = max(min((raw_mask.shape[0] - raw_image.shape[0] / 3) / raw_mask.shape[0], 1), 0.5)
+
+    img_resized = cv2.resize(raw_image, (int(raw_image.shape[1] * scale_factor), int(raw_image.shape[0] * scale_factor)), interpolation = cv2.INTER_LINEAR)
+    mask_resized = cv2.resize(raw_mask, (int(raw_image.shape[1] * scale_factor), int(raw_image.shape[0] * scale_factor)), interpolation = cv2.INTER_LINEAR)
 
     mask_resized[mask_resized > 0] = 255
-    bboxes_resized = []
+    textlines = []
     for region in text_regions:
         for l in region.lines:
-            a = Quadrilateral(l, '', 0)
-            bboxes_resized.append((a.aabb.x // 2, a.aabb.y // 2, a.aabb.w // 2, a.aabb.h // 2))
-    mask_ccs, cc2textline_assignment = filter_masks(mask_resized, bboxes_resized)
-    if mask_ccs:
-        # mask_filtered = reduce(cv2.bitwise_or, mask_ccs)
-        # cv2.imwrite(f'result/mask_filtered.png', mask_filtered)
-        #cv2.imwrite(f'result/{task_id}/mask_filtered_img.png', overlay_mask(img_resized_2, mask_filtered))
-        if method == 'fit_text':
-            final_mask = complete_mask(img_resized, mask_ccs, bboxes_resized, cc2textline_assignment)
-        else:
-            final_mask = complete_mask_fill(img_resized, mask_ccs, bboxes_resized, cc2textline_assignment)
-        #cv2.imwrite(f'result/{task_id}/mask.png', final_mask)
-        #cv2.imwrite(f'result/{task_id}/mask_img.png', overlay_mask(img_resized_2, final_mask))
+            q = Quadrilateral(l * scale_factor, '', 0)
+            textlines.append(q)
+
+    final_mask = complete_mask(img_resized, mask_resized, textlines, dilation_offset=dilation_offset,kernel_size=kernel_size) if method == 'fit_text' else complete_mask_fill([txtln.aabb.xywh for txtln in textlines])
+    if final_mask is None:
+        final_mask = np.zeros((raw_image.shape[0], raw_image.shape[1]), dtype = np.uint8)
+    else:
         final_mask = cv2.resize(final_mask, (raw_image.shape[1], raw_image.shape[0]), interpolation = cv2.INTER_LINEAR)
         final_mask[final_mask > 0] = 255
-    else:
-        final_mask = np.zeros((raw_image.shape[0], raw_image.shape[1]), dtype = np.uint8)
 
-    if ignore_bubble<1 or ignore_bubble>50:
+    if ignore_bubble < 1 or ignore_bubble > 50:
         return final_mask
 
     # bubble
@@ -52,4 +46,5 @@ async def dispatch(text_regions: List[TextBlock], raw_image: np.ndarray, raw_mas
         textblock=cv2.bitwise_and(raw_image, raw_image, mask=temp_mask)
         if is_ignore(textblock, ignore_bubble):
             cv2.drawContours(final_mask, [cnt], -1, 0, -1)
+
     return final_mask

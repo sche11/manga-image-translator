@@ -29,7 +29,6 @@ class FFDNetDenoiser:
         self.weights_dir = _weights_dir
         self.channels = _in_ch
         self.device = _device
-        
         self.model = FFDNet(num_input_channels = _in_ch)
         self.load_weights()
         self.model.eval()
@@ -39,11 +38,12 @@ class FFDNetDenoiser:
         weights_name = 'net_rgb.pth' if self.channels == 3 else 'net_gray.pth'
         weights_path = os.path.join(self.weights_dir, weights_name)
         if self.device == 'cuda':
+            # data paralles only for cuda , no need for mps devices
             state_dict = torch.load(weights_path, map_location=torch.device('cpu'))
-            device_ids = [0]
-            self.model = nn.DataParallel(self.model, device_ids=device_ids).cuda()
+            self.model = nn.DataParallel(self.model,device_ids = [0]).to(self.device)
         else:
-            state_dict = torch.load(weights_path, map_location='cpu')
+            # MPS devices don't support DataParallel
+            state_dict = torch.load(weights_path, map_location=self.device)
             # CPU mode: remove the DataParallel wrapper
             state_dict = remove_dataparallel_wrapper(state_dict)
         self.model.load_state_dict(state_dict)
@@ -90,9 +90,10 @@ class FFDNetDenoiser:
         if self.device == 'cuda':
             dtype = torch.cuda.FloatTensor
         else:
+            # for mps devices is still floatTensor
             dtype = torch.FloatTensor
 
-        imnoisy = imorig.clone()
+        imnoisy = imorig#.clone()
 
 
         with torch.no_grad():
@@ -100,18 +101,18 @@ class FFDNetDenoiser:
             nsigma = torch.FloatTensor([cur_sigma]).type(dtype)
 
 
-        # Estimate noise and subtract it to the input image
+        # Estimate noise and subtract it from the input image
         im_noise_estim = self.model(imnoisy, nsigma)
-        outim = torch.clamp(imnoisy-im_noise_estim, 0., 1.)
+        outim = torch.clamp(imnoisy - im_noise_estim, 0., 1.)
 
         if expanded_h:
-            imorig = imorig[:, :, :-1, :]
+            # imorig = imorig[:, :, :-1, :]
             outim = outim[:, :, :-1, :]
-            imnoisy = imnoisy[:, :, :-1, :]
+            # imnoisy = imnoisy[:, :, :-1, :]
 
         if expanded_w:
-            imorig = imorig[:, :, :, :-1]
+            # imorig = imorig[:, :, :, :-1]
             outim = outim[:, :, :, :-1]
-            imnoisy = imnoisy[:, :, :, :-1]
+            # imnoisy = imnoisy[:, :, :, :-1]
         
         return variable_to_cv2_image(outim)

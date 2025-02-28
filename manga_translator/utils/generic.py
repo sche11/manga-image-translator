@@ -1,9 +1,8 @@
 import os
-from typing import List, Callable, Tuple
+from typing import List, Callable, Tuple, Optional
 import numpy as np
 import cv2
 import functools
-from shapely.geometry import Polygon, MultiPoint
 from PIL import Image
 import tqdm
 import requests
@@ -13,6 +12,8 @@ import re
 import einops
 import unicodedata
 import json
+from shapely import affinity
+from shapely.geometry import Polygon, MultiPoint
 
 try:
     functools.cached_property
@@ -25,18 +26,29 @@ BASE_PATH = os.path.dirname(MODULE_PATH)
 
 # Adapted from argparse.Namespace
 class Context(dict):
-    __getattr__ = dict.get
-    __setattr__ = dict.__setitem__
-    __delattr__ = dict.__delitem__
-
     def __init__(self, **kwargs):
         for name in kwargs:
             setattr(self, name, kwargs[name])
+    
+    def __getattr__(self, item):
+        return self.get(item)
+    
+    def __delattr__(self, key) -> None:
+        return self.__delitem__(key)
+
+    def __setattr__(self, key, value):
+        return self.__setitem__(key, value)
+
+    def __getstate__(self):
+        return self.copy()
+
+    def __setstate__(self, state):
+        self.update(state)
 
     def __eq__(self, other):
         if not isinstance(other, Context):
             return NotImplemented
-        return vars(self) == vars(other)
+        return dict(self) == dict(other)
 
     def __contains__(self, key):
         return key in self.keys()
@@ -64,7 +76,7 @@ class Context(dict):
 
 # TODO: Add TranslationContext for type linting
 
-def atoi(text):
+def atoi(text: str) -> int | str:
     return int(text) if text.isdigit() else text
 
 def natural_sort(l: List[str]):
@@ -80,7 +92,7 @@ def repeating_sequence(s: str):
 
 def is_whitespace(ch):
     """Checks whether `chars` is a whitespace character."""
-    # \t, \n, and \r are technically contorl characters but we treat them
+    # \t, \n, and \r are technically control characters but we treat them
     # as whitespace since they are generally considered as such.
     if ch == " " or ch == "\t" or ch == "\n" or ch == "\r" or ord(ch) == 0:
         return True
@@ -115,9 +127,31 @@ def is_punctuation(ch):
         return True
     return False
 
-def count_valuable_text(text) -> int:
-    # return sum([1 for ch in text if re.search(r'\w', ch)])
-    return sum([1 for ch in text if not is_punctuation(ch) and not is_control(ch) and not is_whitespace(ch)])
+def is_valuable_char(ch):
+    # return re.search(r'[^\d\W]', ch)
+    return not is_punctuation(ch) and not is_control(ch) and not is_whitespace(ch) and not ch.isdigit()
+
+def is_valuable_text(text):
+    for ch in text:
+        if is_valuable_char(ch):
+            return True
+    return False
+
+def count_valuable_text(text: str) -> int:
+    return sum([1 for ch in text if is_valuable_char(ch)])
+
+def is_right_to_left_char(ch):
+    """Checks whether the char belongs to a right to left alphabet."""
+    # Arabic (from https://stackoverflow.com/a/49346768)
+    if ('\u0600' <= ch <= '\u06FF' or
+        '\u0750' <= ch <= '\u077F' or
+        '\u08A0' <= ch <= '\u08FF' or
+        '\uFB50' <= ch <= '\uFDFF' or
+        '\uFE70' <= ch <= '\uFEFF' or
+        '\U00010E60' <= ch <= '\U00010E7F' or
+        '\U0001EE00' <= ch <= '\U0001EEFF'):
+        return True
+    return False
 
 def replace_prefix(s: str, old: str, new: str):
     if s.startswith(old):
@@ -147,9 +181,6 @@ def get_filename_from_url(url: str, default: str = '') -> str:
     if m:
         return m.group(1)
     return default
-
-def is_url(s: str):
-    return re.search(r'^http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+$', s) and True
 
 def download_url_with_progressbar(url: str, path: str):
     if os.path.basename(path) in ('.', '') or os.path.isdir(path):
@@ -226,7 +257,7 @@ class AvgMeter():
         else:
             return 0
 
-def load_image(img: Image.Image):
+def load_image(img: Image.Image) -> Tuple[np.ndarray, Optional[Image.Image]]:
     if img.mode == 'RGBA':
         # from https://stackoverflow.com/questions/9166400/convert-rgba-png-to-rgb-with-pil
         img.load()  # needed for split()
@@ -244,13 +275,15 @@ def load_image(img: Image.Image):
     else:
         return np.array(img.convert('RGB')), None
 
-def dump_image(img: np.ndarray, alpha_ch: Image.Image = None):
+def dump_image(img_pil: Image.Image, img: np.ndarray, alpha_ch: Image.Image = None):
     if alpha_ch is not None:
         if img.shape[2] != 4 :
             img = np.concatenate([img.astype(np.uint8), np.array(alpha_ch).astype(np.uint8)[..., None]], axis = 2)
     else:
         img = img.astype(np.uint8)
-    return Image.fromarray(img)
+    result = img_pil.convert('RGBA').resize((img.shape[1], img.shape[0]))
+    result.paste(Image.fromarray(img), mask = alpha_ch)
+    return result
 
 def resize_keep_aspect(img, size):
     ratio = (float(size)/max(img.shape[0], img.shape[1]))
@@ -289,6 +322,12 @@ def image_resize(image, width = None, height = None, inter = cv2.INTER_AREA):
     # return the resized image
     return resized
 
+def resize_polygon(pts, xfact, yfact, origin='center'):
+    poly = Polygon(pts)
+    poly = affinity.scale(poly, xfact=xfact, yfact=yfact, origin=origin)
+    dst_points = np.array(poly.exterior.coords[:4])
+    return dst_points
+
 class BBox(object):
     def __init__(self, x: int, y: int, w: int, h: int, text: str, prob: float, fg_r: int = 0, fg_g: int = 0, fg_b: int = 0, bg_r: int = 0, bg_g: int = 0, bg_b: int = 0):
         self.x = x
@@ -314,12 +353,53 @@ class BBox(object):
         tl, tr, br, bl = np.array([self.x, self.y]), np.array([self.x + self.w, self.y]), np.array([self.x + self.w, self.y+ self.h]), np.array([self.x, self.y + self.h])
         return tl, tr, br, bl
 
+    @property
+    def xywh(self):
+        return np.array([self.x, self.y, self.w, self.h], dtype=np.int32)
+    
+
+def sort_pnts(pts: np.ndarray):
+    '''
+    Direction must be provided for sorting.
+    The longer structure vector (mean of long side vectors) of input points is used to determine the direction.
+    It is reliable enough for text lines but not for blocks.
+    '''
+
+    if isinstance(pts, List):
+        pts = np.array(pts)
+    assert isinstance(pts, np.ndarray) and pts.shape == (4, 2)
+    pairwise_vec = (pts[:, None] - pts[None]).reshape((16, -1))
+    pairwise_vec_norm = np.linalg.norm(pairwise_vec, axis=1)
+    long_side_ids = np.argsort(pairwise_vec_norm)[[8, 10]]
+    long_side_vecs = pairwise_vec[long_side_ids]
+    inner_prod = (long_side_vecs[0] * long_side_vecs[1]).sum()
+    if inner_prod < 0:
+        long_side_vecs[0] = -long_side_vecs[0]
+    struc_vec = np.abs(long_side_vecs.mean(axis=0))
+    is_vertical = struc_vec[0] <= struc_vec[1]
+
+    if is_vertical:
+        pts = pts[np.argsort(pts[:, 1])]
+        pts = pts[[*np.argsort(pts[:2, 0]), *np.argsort(pts[2:, 0])[::-1] + 2]]
+        return pts, is_vertical
+    else:
+        pts = pts[np.argsort(pts[:, 0])]
+        pts_sorted = np.zeros_like(pts)
+        pts_sorted[[0, 3]] = sorted(pts[[0, 1]], key=lambda x: x[1])
+        pts_sorted[[1, 2]] = sorted(pts[[2, 3]], key=lambda x: x[1])
+        return pts_sorted, is_vertical
+
+
 class Quadrilateral(object):
     """
     Helper for storing textlines that contains various helper functions.
     """
-    def __init__(self, pts: np.ndarray, text: str, prob: float, fg_r: int = 0, fg_g: int = 0, fg_b: int = 0, bg_r: int = 0, bg_g: int = 0, bg_b: int = 0):
-        self.pts = pts
+    def __init__(self, pts: np.ndarray, text: str, prob: float, fg_r: int = 0, fg_g: int = 0, fg_b: int = 0, bg_r: int = 0, bg_g: int = 0, bg_b: int = 0):    
+        self.pts, is_vertical = sort_pnts(pts)
+        if is_vertical:
+            self.direction = 'v'
+        else:
+            self.direction = 'h'
         self.text = text
         self.prob = prob
         self.fg_r = fg_r
@@ -329,7 +409,7 @@ class Quadrilateral(object):
         self.bg_g = bg_g
         self.bg_b = bg_b
         self.assigned_direction: str = None
-        self.textlines: list[Quadrilateral] = []
+        self.textlines: List[Quadrilateral] = []
 
     @functools.cached_property
     def structure(self) -> List[np.ndarray]:
@@ -352,11 +432,11 @@ class Quadrilateral(object):
 
     @property
     def fg_colors(self):
-        return self.fg_r, self.fg_g, self.fg_b
+        return np.array([self.fg_r, self.fg_g, self.fg_b])
 
     @property
     def bg_colors(self):
-        return self.bg_r, self.bg_g, self.bg_b
+        return np.array([self.bg_r, self.bg_g, self.bg_b])
 
     @functools.cached_property
     def aspect_ratio(self) -> float:
@@ -404,21 +484,36 @@ class Quadrilateral(object):
         v_vec = l1b - l1a
         h_vec = l2b - l2a
         ratio = np.linalg.norm(v_vec) / np.linalg.norm(h_vec)
-        src_pts = self.pts.astype(np.float32)
+
+        src_pts = self.pts.astype(np.int64).copy()
+        im_h, im_w = img.shape[:2]
+
+        x1, y1, x2, y2 = src_pts[:, 0].min(), src_pts[:, 1].min(), src_pts[:, 0].max(), src_pts[:, 1].max()
+        x1 = np.clip(x1, 0, im_w)
+        y1 = np.clip(y1, 0, im_h)
+        x2 = np.clip(x2, 0, im_w)
+        y2 = np.clip(y2, 0, im_h)
+        # cv2.warpPerspective could overflow if image size is too large, better crop it here
+        img_croped = img[y1: y2, x1: x2]
+
+        
+        src_pts[:, 0] -= x1
+        src_pts[:, 1] -= y1
+
         self.assigned_direction = direction
         if direction == 'h':
             h = max(int(textheight), 2)
             w = max(int(round(textheight / ratio)), 2)
             dst_pts = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]).astype(np.float32)
             M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-            region = cv2.warpPerspective(img, M, (w, h))
+            region = cv2.warpPerspective(img_croped, M, (w, h))
             return region
         elif direction == 'v':
             w = max(int(textheight), 2)
             h = max(int(round(textheight * ratio)), 2)
             dst_pts = np.array([[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]).astype(np.float32)
             M, _ = cv2.findHomography(src_pts, dst_pts, cv2.RANSAC, 5.0)
-            region = cv2.warpPerspective(img, M, (w, h))
+            region = cv2.warpPerspective(img_croped, M, (w, h))
             region = cv2.rotate(region, cv2.ROTATE_90_COUNTERCLOCKWISE)
             return region
 
@@ -447,16 +542,6 @@ class Quadrilateral(object):
         if abs(np.dot(unit_vector_1, e1)) < 0.05 or abs(np.dot(unit_vector_1, e2)) < 0.05 or abs(np.dot(unit_vector_2, e1)) < 0.05 or abs(np.dot(unit_vector_2, e2)) < 0.05:
             return True
         return False
-
-    @functools.cached_property
-    def direction(self) -> str:
-        [l1a, l1b, l2a, l2b] = [a.astype(np.float32) for a in self.structure]
-        v_vec = l1b - l1a
-        h_vec = l2b - l2a
-        if np.linalg.norm(v_vec) > np.linalg.norm(h_vec):
-            return 'v'
-        else:
-            return 'h'
 
     @functools.cached_property
     def cosangle(self) -> float:
@@ -496,7 +581,7 @@ class Quadrilateral(object):
         return self.distance_impl(other, rho)# + 1000 * abs(self.angle - other.angle)
 
     def distance_impl(self, other, rho = 0.5) -> float:
-        assert self.assigned_direction == other.assigned_direction
+        # assert self.assigned_direction == other.assigned_direction
         #return gjk_distance(self.points, other.points)
         # b1 = self.aabb
         # b2 = b2.aabb
@@ -547,8 +632,24 @@ class Quadrilateral(object):
             else:
                 return dist(self.pts[2][0], self.pts[2][1], other.pts[2][0], other.pts[2][1])
 
+    def copy(self, new_pts: np.ndarray):
+        return Quadrilateral(new_pts, self.text, self.prob, *self.fg_colors, *self.bg_colors)
+
+# def merge_quadrilaterals(q1: Quadrilateral, q2: Quadrilateral):
+#     min_rect = np.array(Polygon([*q1.pts, *q2.pts]).minimum_rotated_rectangle.exterior.coords[:4])
+#     if q1.centroid[0] < q2.centroid[0] or q1.centroid[1] < q1.centroid[1]:
+#         text = q1.text + ' ' + q2.text
+#         # if q1.centroid[0] < q2.centroid[0]:
+#         #     min_rect = np.array([q1.pts[0], q2.pts[1], q2.pts[2], q1.pts[3]])
+#     else:
+#         text = q2.text + ' ' + q1.text
+#     prob = (q1.prob + q2.prob) / 2
+#     fg_colors = (q1.fg_colors + q2.fg_colors) // 2
+#     bg_colors = (q1.bg_colors + q2.bg_colors) // 2
+#     return Quadrilateral(min_rect, text, prob, *fg_colors, *bg_colors)
+
 def dist(x1, y1, x2, y2):
-    return np.sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2))
+    return np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
 
 def rect_distance(x1, y1, x1b, y1b, x2, y2, x2b, y2b):
     left = x2b < x1
@@ -611,13 +712,16 @@ def distance_point_lineseg(p: np.ndarray, p1: np.ndarray, p2: np.ndarray):
     return np.sqrt(dx * dx + dy * dy)
 
 
-def quadrilateral_can_merge_region(a: Quadrilateral, b: Quadrilateral, ratio = 1.9, discard_connection_gap = 5, char_gap_tolerance = 0.6, char_gap_tolerance2 = 1.5, font_size_ratio_tol = 1.5, aspect_ratio_tol = 2) -> bool:
+def quadrilateral_can_merge_region(a: Quadrilateral, b: Quadrilateral, ratio = 1.9, discard_connection_gap = 2, char_gap_tolerance = 0.6, char_gap_tolerance2 = 1.5, font_size_ratio_tol = 1.5, aspect_ratio_tol = 2) -> bool:
     b1 = a.aabb
     b2 = b.aabb
     char_size = min(a.font_size, b.font_size)
     x1, y1, w1, h1 = b1.x, b1.y, b1.w, b1.h
     x2, y2, w2, h2 = b2.x, b2.y, b2.w, b2.h
-    dist = rect_distance(x1, y1, x1 + w1, y1 + h1, x2, y2, x2 + w2, y2 + h2)
+    # dist = rect_distance(x1, y1, x1 + w1, y1 + h1, x2, y2, x2 + w2, y2 + h2)
+    p1 = Polygon(a.pts)
+    p2 = Polygon(b.pts)
+    dist = p1.distance(p2)
     if dist > discard_connection_gap * char_size:
         return False
     if max(a.font_size, b.font_size) / char_size > font_size_ratio_tol:
@@ -789,7 +893,7 @@ def color_difference(rgb1: List, rgb2: List) -> float:
     # https://en.wikipedia.org/wiki/Color_difference#CIE76
     color1 = np.array(rgb1, dtype=np.uint8).reshape(1, 1, 3)
     color2 = np.array(rgb2, dtype=np.uint8).reshape(1, 1, 3)
-    diff = cv2.cvtColor(color1, cv2.COLOR_RGB2LAB).astype(np.float64) - cv2.cvtColor(color2, cv2.COLOR_RGB2LAB).astype(np.float64)
+    diff = cv2.cvtColor(color1, cv2.COLOR_RGB2LAB).astype(np.float32) - cv2.cvtColor(color2, cv2.COLOR_RGB2LAB).astype(np.float32)
     diff[..., 0] *= 0.392
     diff = np.linalg.norm(diff, axis=2) 
     return diff.item()
@@ -797,8 +901,9 @@ def color_difference(rgb1: List, rgb2: List) -> float:
 def rgb2hex(r,g,b):
     return "#{:02x}{:02x}{:02x}".format(r,g,b)
 
-def hex2rgb(hexcode):
-    return tuple(map(ord,hexcode[1:].decode('hex')))
+def hex2rgb(h):
+    h = h.lstrip('#')
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
 
 def get_color_name(rgb: List[int]) -> str:
         try:
